@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>selectAudioTrack() repro -- resolves but doesn't apply</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+  iframe { width: 100%; aspect-ratio: 16/9; border: 0; }
+  button { font-size: 14px; padding: 0.5rem 1rem; margin: 0.5rem 0.5rem 0.5rem 0; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+  th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 13px; }
+  .fail { background: #fee; }
+  .pass { background: #efe; }
+  #summary { font-weight: bold; margin-top: 0.75rem; }
+  #status { color: #555; }
+</style>
+</head>
+<body>
+<h1>selectAudioTrack() reproduction</h1>
+<p>
+  Minimal standalone repro of <code>player.selectAudioTrack(language, kind)</code>
+  resolving successfully (echoing back the requested track) while
+  <code>getAudioTracks()</code> immediately afterward still shows the
+  previous track <code>enabled: true</code> and the requested track
+  <code>enabled: false</code>. No frameworks, no build step -- just the
+  Player SDK loaded from your own CDN.
+</p>
+
+<iframe
+  id="player-iframe"
+  src="https://player.vimeo.com/video/1169813728?autoplay=1&muted=1&texttrack=en"
+  allow="autoplay; fullscreen"
+></iframe>
+
+<p id="status">Waiting for playback to start...</p>
+<button id="run-btn" disabled>Run 10 trials (EN &#8594; ES &#8594; reset)</button>
+<div id="summary"></div>
+<table id="results"><thead>
+  <tr><th>#</th><th>selectAudioTrack() resolved with</th><th>getAudioTracks() right after</th><th>Applied?</th></tr>
+</thead><tbody></tbody></table>
+
+<script src="https://player.vimeo.com/api/player.js"></script>
+<script>
+  const iframe = document.getElementById("player-iframe");
+  const player = new Vimeo.Player(iframe);
+  const statusEl = document.getElementById("status");
+  const runBtn = document.getElementById("run-btn");
+  const resultsBody = document.querySelector("#results tbody");
+  const summaryEl = document.getElementById("summary");
+
+  // Doesn't depend on autoplay actually starting -- some embedding contexts
+  // (like CodePen's own nested preview iframe) can block it silently. Just
+  // waits for the player to be ready, then a short settle delay, matching
+  // what we actually found matters (construction timing), not playback
+  // state.
+  player.ready()
+    .then(() => new Promise((resolve) => setTimeout(resolve, 3000)))
+    .then(() => {
+      statusEl.textContent = "Player ready. Ready to run trials.";
+      runBtn.disabled = false;
+    })
+    .catch((err) => {
+      statusEl.textContent = "Player failed to load: " + err;
+    });
+
+  // A second, separate issue we've hit: selectAudioTrack()/
+  // selectDefaultAudioTrack() can also just never resolve or reject at
+  // all. This wrapper keeps a hung call from stalling every trial after
+  // it -- if it fires, that trial is reported as "HUNG", which is itself
+  // useful evidence, not something to hide.
+  function withTimeout(promise, ms) {
+    return Promise.race([
+      promise.then((v) => ({ settled: true, value: v })),
+      new Promise((resolve) => setTimeout(() => resolve({ settled: false }), ms)),
+    ]);
+  }
+
+  async function runOneTrial(n) {
+    // Ask for Spanish audio (kind looked up dynamically, matching the
+    // documented API).
+    const tracksBefore = await player.getAudioTracks();
+    const kind = tracksBefore.find((t) => t.language === "es")?.kind;
+    const selectOutcome = await withTimeout(player.selectAudioTrack("es", kind), 5000);
+
+    // Check real state regardless of whether the select call above ever
+    // settled -- getAudioTracks() itself has never been observed to hang.
+    const tracksAfter = await player.getAudioTracks();
+    const applied = tracksAfter.some((t) => t.language === "es" && t.enabled);
+
+    const row = document.createElement("tr");
+    row.className = applied ? "pass" : "fail";
+    row.innerHTML =
+      "<td>" + n + "</td>" +
+      "<td><code>" + (selectOutcome.settled ? JSON.stringify(selectOutcome.value) : "HUNG (never resolved within 5s)") + "</code></td>" +
+      "<td><code>" + JSON.stringify(tracksAfter.map((t) => ({ language: t.language, enabled: t.enabled }))) + "</code></td>" +
+      "<td>" + (applied ? "YES" : "no") + "</td>";
+    resultsBody.appendChild(row);
+
+    // Reset to English before the next trial so trials don't cascade off
+    // each other's already-switched state. Also timeout-protected for the
+    // same reason.
+    await withTimeout(player.selectDefaultAudioTrack().catch(() => {}), 5000);
+    await new Promise((r) => setTimeout(r, 500));
+
+    return applied;
+  }
+
+  runBtn.addEventListener("click", async () => {
+    runBtn.disabled = true;
+    resultsBody.innerHTML = "";
+    summaryEl.textContent = "Running...";
+
+    let passed = 0;
+    const total = 10;
+    for (let n = 1; n <= total; n++) {
+      if (await runOneTrial(n)) passed++;
+    }
+
+    summaryEl.textContent = passed + " / " + total + " trials actually applied the requested audio track.";
+    runBtn.disabled = false;
+  });
+</script>
+</body>
+</html>
