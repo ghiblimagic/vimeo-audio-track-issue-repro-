@@ -176,9 +176,25 @@
       // Real user gesture (this click), so autoplay-policy concerns don't
       // apply. Needs to actually be playing for the calls below to behave
       // normally -- confirmed by direct testing (paused-only and
-      // autoplay=0 both left every trial hanging).
-      await player.play();
-      console.log("[repro] click: play() resolved, starting trials");
+      // autoplay=0 both left every trial hanging). play() itself can also
+      // just hang and never resolve or reject, same as the other calls in
+      // this file -- confirmed live, not just in isolated testing -- so
+      // it's timeout-protected too. Proceeding with the trials regardless
+      // of whether it settled: a hung promise here doesn't necessarily
+      // mean playback didn't actually start, matching the same pattern
+      // we've found with every other call in this reproduction.
+      const playOutcome = await withTimeout(player.play(), 5000);
+      const reallyPlaying = await player.getPaused().then((paused) => !paused).catch(() => null);
+      console.log(
+        "[repro] click: play() outcome",
+        playOutcome,
+        "-- actually playing now?",
+        reallyPlaying,
+        "-- starting trials regardless",
+      );
+      if (reallyPlaying === false) {
+        statusEl.textContent = "Warning: play() didn't actually start playback -- trials will likely all hang below.";
+      }
 
       for (let n = 1; n <= total; n++) {
         if (await runOneTrial(n)) passed++;
