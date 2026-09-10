@@ -13,6 +13,13 @@
   .pass { background: #efe; }
   #summary { font-weight: bold; margin-top: 0.75rem; }
   #status { color: #555; }
+  .content-note {
+    background: #fff3cd;
+    border: 1px solid #f0c36d;
+    border-radius: 4px;
+    padding: 0.75rem 1rem;
+    margin: 1rem 0;
+  }
 </style>
 </head>
 <body>
@@ -26,14 +33,24 @@
   Player SDK loaded from your own CDN.
 </p>
 
+<div class="content-note">
+  <strong>Content note:</strong> the embedded video is a real documentary
+  with real medical content. Starting around 1:30 there are graphic images
+  of a child pre-reconstructive surgery. The button below plays the video
+  (needs to be actively playing for the calls below to behave normally)
+  only for as long as the trials take, then explicitly pauses it -- well
+  short of 1:30. Please don't scrub forward past 1:30 if you'd rather not
+  see it.
+</div>
+
 <iframe
   id="player-iframe"
-  src="https://player.vimeo.com/video/1169813728?autoplay=1&muted=1&texttrack=en"
-  allow="autoplay; fullscreen"
+  src="https://player.vimeo.com/video/1169813728?muted=1&texttrack=en"
+  allow="fullscreen"
 ></iframe>
 
-<p id="status">Waiting for playback to start...</p>
-<button id="run-btn" disabled>Run 10 trials (EN &#8594; ES &#8594; reset)</button>
+<p id="status">Loading player...</p>
+<button id="run-btn" disabled>Play &amp; run 10 trials (EN &#8594; ES &#8594; reset)</button>
 <div id="summary"></div>
 <table id="results"><thead>
   <tr><th>#</th><th>selectAudioTrack() resolved with</th><th>getAudioTracks() right after</th><th>Applied?</th></tr>
@@ -41,22 +58,34 @@
 
 <script src="https://player.vimeo.com/api/player.js"></script>
 <script>
+  console.log("[repro] script tag executing, top of file");
   const iframe = document.getElementById("player-iframe");
-  const player = new Vimeo.Player(iframe);
   const statusEl = document.getElementById("status");
   const runBtn = document.getElementById("run-btn");
   const resultsBody = document.querySelector("#results tbody");
   const summaryEl = document.getElementById("summary");
 
-  // Doesn't depend on autoplay actually starting -- some embedding contexts
-  // (like CodePen's own nested preview iframe) can block it silently. Just
-  // waits for the player to be ready, then a short settle delay, matching
-  // what we actually found matters (construction timing), not playback
-  // state.
+  let player;
+  try {
+    player = new Vimeo.Player(iframe);
+  } catch (err) {
+    statusEl.textContent = "Player constructor threw: " + err;
+    throw err;
+  }
+
+  // Construction-timing warm-up before enabling the button -- separate
+  // from playback state, this is about `new Vimeo.Player()` itself
+  // needing a moment before its API calls are reliable (see our own
+  // writeup on this). Actual playback (needed for the calls below to
+  // behave normally -- confirmed by testing, see the button handler)
+  // only starts once the button is clicked, a real user gesture, and is
+  // explicitly paused the moment the trials finish -- no autoplay, no
+  // background timers, playing only exists within the click handler's
+  // own bounded lifetime below.
   player.ready()
     .then(() => new Promise((resolve) => setTimeout(resolve, 3000)))
     .then(() => {
-      statusEl.textContent = "Player ready. Ready to run trials.";
+      statusEl.textContent = "Player ready. Click below to play and run trials.";
       runBtn.disabled = false;
     })
     .catch((err) => {
@@ -67,57 +96,104 @@
   // selectDefaultAudioTrack() can also just never resolve or reject at
   // all. This wrapper keeps a hung call from stalling every trial after
   // it -- if it fires, that trial is reported as "HUNG", which is itself
-  // useful evidence, not something to hide.
+  // useful evidence, not something to hide. Both branches of the wrapped
+  // promise are handled (fulfilled and rejected) so nothing is ever left
+  // as an unhandled rejection.
   function withTimeout(promise, ms) {
     return Promise.race([
-      promise.then((v) => ({ settled: true, value: v })),
+      promise.then(
+        (v) => ({ settled: true, value: v }),
+        (err) => ({ settled: true, error: String(err) }),
+      ),
       new Promise((resolve) => setTimeout(() => resolve({ settled: false }), ms)),
     ]);
   }
 
   async function runOneTrial(n) {
-    // Ask for Spanish audio (kind looked up dynamically, matching the
-    // documented API).
-    const tracksBefore = await player.getAudioTracks();
-    const kind = tracksBefore.find((t) => t.language === "es")?.kind;
-    const selectOutcome = await withTimeout(player.selectAudioTrack("es", kind), 5000);
+    console.log("[repro] trial", n, "starting");
+    try {
+      // Ask for Spanish audio (kind looked up dynamically, matching the
+      // documented API).
+      const tracksBefore = await player.getAudioTracks().catch((err) => {
+        throw new Error("getAudioTracks() before select rejected: " + err);
+      });
+      console.log("[repro] trial", n, "tracksBefore", tracksBefore);
+      const kind = tracksBefore.find((t) => t.language === "es")?.kind;
+      console.log("[repro] trial", n, "kind", kind, "-- calling selectAudioTrack");
+      const selectOutcome = await withTimeout(player.selectAudioTrack("es", kind), 5000);
+      console.log("[repro] trial", n, "selectOutcome", selectOutcome);
 
-    // Check real state regardless of whether the select call above ever
-    // settled -- getAudioTracks() itself has never been observed to hang.
-    const tracksAfter = await player.getAudioTracks();
-    const applied = tracksAfter.some((t) => t.language === "es" && t.enabled);
+      // Check real state regardless of whether the select call above ever
+      // settled -- getAudioTracks() itself has never been observed to
+      // hang or reject in our testing, but it's still caught defensively.
+      const tracksAfter = await player.getAudioTracks().catch((err) => {
+        throw new Error("getAudioTracks() after select rejected: " + err);
+      });
+      const applied = tracksAfter.some((t) => t.language === "es" && t.enabled);
 
-    const row = document.createElement("tr");
-    row.className = applied ? "pass" : "fail";
-    row.innerHTML =
-      "<td>" + n + "</td>" +
-      "<td><code>" + (selectOutcome.settled ? JSON.stringify(selectOutcome.value) : "HUNG (never resolved within 5s)") + "</code></td>" +
-      "<td><code>" + JSON.stringify(tracksAfter.map((t) => ({ language: t.language, enabled: t.enabled }))) + "</code></td>" +
-      "<td>" + (applied ? "YES" : "no") + "</td>";
-    resultsBody.appendChild(row);
+      const row = document.createElement("tr");
+      row.className = applied ? "pass" : "fail";
+      const selectDisplay = !selectOutcome.settled
+        ? "HUNG (never resolved within 5s)"
+        : selectOutcome.error
+          ? "REJECTED: " + selectOutcome.error
+          : JSON.stringify(selectOutcome.value);
+      row.innerHTML =
+        "<td>" + n + "</td>" +
+        "<td><code>" + selectDisplay + "</code></td>" +
+        "<td><code>" + JSON.stringify(tracksAfter.map((t) => ({ language: t.language, enabled: t.enabled }))) + "</code></td>" +
+        "<td>" + (applied ? "YES" : "no") + "</td>";
+      resultsBody.appendChild(row);
 
-    // Reset to English before the next trial so trials don't cascade off
-    // each other's already-switched state. Also timeout-protected for the
-    // same reason.
-    await withTimeout(player.selectDefaultAudioTrack().catch(() => {}), 5000);
-    await new Promise((r) => setTimeout(r, 500));
+      // Reset to English before the next trial so trials don't cascade off
+      // each other's already-switched state. Also timeout-protected for
+      // the same reason.
+      console.log("[repro] trial", n, "resetting to English");
+      await withTimeout(player.selectDefaultAudioTrack(), 5000);
+      await new Promise((r) => setTimeout(r, 500));
+      console.log("[repro] trial", n, "done, applied =", applied);
 
-    return applied;
+      return applied;
+    } catch (err) {
+      console.log("[repro] trial", n, "THREW", err);
+      const row = document.createElement("tr");
+      row.className = "fail";
+      row.innerHTML = "<td>" + n + "</td><td colspan='3'>Trial threw: " + err + "</td>";
+      resultsBody.appendChild(row);
+      return false;
+    }
   }
 
   runBtn.addEventListener("click", async () => {
     runBtn.disabled = true;
     resultsBody.innerHTML = "";
-    summaryEl.textContent = "Running...";
+    summaryEl.textContent = "Playing and running...";
+    console.log("[repro] click: calling player.play()");
 
     let passed = 0;
     const total = 10;
-    for (let n = 1; n <= total; n++) {
-      if (await runOneTrial(n)) passed++;
-    }
+    try {
+      // Real user gesture (this click), so autoplay-policy concerns don't
+      // apply. Needs to actually be playing for the calls below to behave
+      // normally -- confirmed by direct testing (paused-only and
+      // autoplay=0 both left every trial hanging).
+      await player.play();
+      console.log("[repro] click: play() resolved, starting trials");
 
-    summaryEl.textContent = passed + " / " + total + " trials actually applied the requested audio track.";
-    runBtn.disabled = false;
+      for (let n = 1; n <= total; n++) {
+        if (await runOneTrial(n)) passed++;
+      }
+      summaryEl.textContent = passed + " / " + total + " trials actually applied the requested audio track.";
+    } catch (err) {
+      console.log("[repro] click: THREW", err);
+      summaryEl.textContent = "Run failed: " + err;
+    } finally {
+      runBtn.disabled = false;
+      // Nothing left to watch -- stop playback the moment the trials (or
+      // the play() call itself) are done, well short of 1:30.
+      player.pause().catch(() => {});
+      console.log("[repro] click: done, paused");
+    }
   });
 </script>
 </body>
